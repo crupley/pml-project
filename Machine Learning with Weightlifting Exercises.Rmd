@@ -1,0 +1,184 @@
+---
+title: "Machine Learning with Weightlifting Exercises"
+author: "crupley"
+date: "Tuesday, January 20, 2015"
+output: html_document
+---
+
+# Introduction
+
+Proper form in weightlifting is necessary for injury prevention and maximum benefit. Typically, a novice will require a trained observer to provide feedback in order to achieve the correct form. Fitness trackers are becoming increasingly common and efforts are being made to automate this process. A training dataset has been provided by the research group Groupware[1] in which they record various biometric data for subjects exercising with both good and bad form. They refer to it as the "Weightlifting Exercise", or WLE, dataset. I wish to use this data to develop a model that can predict if a subject is using the correct form by reading their various sensor data.
+
+The dataset contains various sensor readings for several participants in the study. They were asked to perform an exercise in one of five ways which were classified as follows.
+
+* correct form (Class A)
+* throwing the elbows to the front (Class B)
+* lifting the weight only halfway (Class C)
+* lowering the weight only halfway (Class D)
+* throwing the hips to the front (Class E)
+
+The aim of this exercise will be to identify which of these categories an exercise motion corresponds to for 20 given unknown examples of sensor data.
+
+This project is completed as part of a course entitled "Practical Machine Learning" created by Coursera in partnership with Johns Hopkins[2].
+
+## Part I: Exploring the Data
+
+The data provided consists of nearly 20,000 observations on nearly 150 variables of sensor data. Since training a machine learning model can be rather computationaly intensitive, I would like to pare down some of the less-useful data and also get an idea of how much computing time creating the model will take.
+
+First, after inspecting the data, I was able to immediately select many variable to exclude since they were either mostly blank of full of invalid entries (NA). I also removed demographic data, time and date, and other variable that did not impact the outcomes. The excluded columns are,
+
+```{r setup, echo=FALSE,results='hide'}
+library(caret)
+library(randomForest)
+
+train <- read.csv("pml-training.csv")
+test <- read.csv("pml-testing.csv")
+opar <- par(no.readonly = TRUE)
+```
+
+```{r exclude}
+#columns of data to exclude
+excludecol <- rep_len(FALSE, length(train[1,]))
+excludecol[c(1:7, 12:36, 50:59, 69:83, 87:101, 
+             103:112, 125:139, 141:150, 160)] <- TRUE
+```
+
+This reduced the dataset to 52 potentially useful variables.
+
+To get an idea of the processing time required to create a model based on some of this data, I ran a few test cases. All models are created using the `caret` package in R.
+
+The first test will be to determine the effect of the number of variables used for fitting the model on both the computation time and the accuracy of the model. I tested in a range from 5 to 50 variables using only 1% of the training data to limit the computation time required. The results are as follows.
+
+```{r time and accuracy vs ncols, cache=TRUE}
+store <- NULL
+set.seed(108)
+t <- createDataPartition(train[,160], p = 0.01)
+
+for(i in seq(5,50,5)){
+    time <- system.time(mod <- train(train[,!excludecol][t$Resample1,1:i],
+                                     train[t$Resample1,160]))
+    pred <- predict(mod, newdata = train[-t$Resample1,!excludecol])
+    cm <- confusionMatrix(pred, train[-t$Resample1,160])
+    store <- rbind(store, c(i, time[1], cm$overall[1]))
+}
+```
+
+```{r time and accuracy v ncols plot, echo=FALSE}
+par(mar = c(5.1, 4.1, 4.1, 4.1))
+plot(store[,1], store[,2], ylab = "Time, s", xlab = "Number of Variables",
+     type = "l", col = "blue",
+     main = "Effect of number of variables used for fit, 1% of examples")
+par(new = TRUE)
+plot(store[,1], store[,3], xaxt = "n", yaxt = "n", xlab = "", ylab = "",
+     pch = 16)
+axis(4)
+mtext("Accuracy", side = 4, line = 3)
+legend("topleft", c("time", "accuracy"), 
+       pch = c(NA,16), lty = c("solid", NA), col = c("blue", "black"))
+par(opar)
+```
+
+It appears that In this region, adding columns of data adds 3s to computation time for every 5 columns. However, this does not have a clear effect on accuracy since it only increases from 61% to 66%.
+
+I also want to know how many of the observations were needed to create an accurate model. As a rough estimate on the lower end, I generated a plot of computing time required to model using from 1% to 5% of the training data with the following result.
+
+
+```{r time and accuracy vs percent data, cache=TRUE}
+store <- NULL
+for(i in seq(0.01,0.05,0.01)){
+    set.seed(108)
+    t <- createDataPartition(train[,160], p = i)
+    time <- system.time(mod <- train(train[,!excludecol][t$Resample1,1:10],
+                                     train[t$Resample1,160]))
+    pred <- predict(mod, newdata = train[-t$Resample1,!excludecol])
+    cm <- confusionMatrix(pred, train[-t$Resample1,160])
+    store <- rbind(store, c(i, time[1], cm$overall[1]))
+}
+```
+
+```{r time and accuracy vs percent data plot}
+par(mar = c(5.1, 4.1, 4.1, 4.1))
+plot(100*store[,1], store[,2], ylab = "Time", type = "l", col = "blue", 
+     xlab = "% data", main = "Effect of number of examples, 10 variables")
+par(new = TRUE)
+plot(store[,1], store[,3], xaxt = "n", yaxt = "n", xlab = "", ylab = "",
+     pch = 16)
+axis(4)
+mtext("Accuracy", side = 4, line = 3)
+legend("topleft", c("time", "accuracy"), 
+       pch = c(NA,16), lty = c("solid", NA), col = c("blue", "black"))
+par(opar)
+```
+
+So adding more data does have a significant positive effect on accuracy of the model. In this region, for each 1% of the dataset that is added, computation time increases by 15 seconds. Accuracy was increasing approximately linearly in this region, from 60% to 77%, when data usage went from 1% to 5%.
+
+Since I would like to use about 40% of the data for cross-validation, that leaves 60% left to train the model. Ideally, I could use all of that data in order to create the most accurate model possible as long as computing time does not suffer. Since it took about 40 seconds to create the model using 1% of the data and the time appears to increase linearly with more data, a good estimate of the time it will take to train a model using all the available data is 40s * 60% = 2400 seconds or 40 minutes.
+
+## Part II: Creating a Model
+
+Based on the previous analysis, I will attempt to create a model using the training set as reduced to 52 variables and I will further take a random subset of 60% of the training data to leave 40% for a cross-validation set which I can use to estimate the out-of-sample error. Once again, to create the model I will use the `train` function from the `caret` package. In this case, the function selects a Random Forest method to create the model.
+
+```{r large data fit}
+# 60% of data for training set (40% for cross validation)
+# all columns (variables) used
+
+store <- NULL
+set.seed(108)
+t <- createDataPartition(train[,160], p = 0.6)
+```
+
+```{r large data fit train, eval=FALSE}
+time <- system.time(mod <- train(train[,!excludecol][t$Resample1,],
+                                 train[t$Resample1,160]))
+```
+```{r data load, echo=FALSE}
+load("model.RData")
+# save(list = "mod", file = "model.RData")
+```
+This model now has been trained on all of the 52 variables I selected and 60% of the training data. The model did take some time to train (4560 seconds or 1 hour 16 minutes), but it was manageable. The next step is to measure the quality of the model. To do this, I use the `confusionMatrix` function again from the `caret` package. This function will evaluate the performance of this model on the cross-validation data set. The results are as follows.
+
+```{r large data evaluation}
+pred <- predict(mod, newdata = train[-t$Resample1,!excludecol])
+cm <- confusionMatrix(pred, train[-t$Resample1,160])
+```
+
+```{r large data output, echo=FALSE}
+store <- rbind(store, c(0.6, time[1], cm$overall[1]))
+{print("Normalized Confusion Matrix")
+print(round(100*cm$table / colSums(cm$table),2))}
+print(cm$overall[1])
+```
+
+The confusion matrix comparing the model's predictions to the actual values looks quite good (i.e. most values are along the diagonal where predictions = actual). The goodness of fit is also reflected by the high accuracy value, `r round(100*cm$overall[1],2)`% accuracy. We can expect the out-of-sample accuracy to be similar to this.
+
+## Part III: Predictions
+
+Now that I have a model which is performing well with very good accuracy (on the cross-validation set), it is time to apply it to the unknown cases in the test data set. The test data contains 20 observations of activities but it is missing the variable describing the activity performed. I will use the model to predict the activity based on the sensor data and output my predictions to individual text files as specified in the problem assignment.
+
+```{r generate answers}
+answers <- predict(mod, newdata = test[,!excludecol])
+{print("Results of applying the model to test set")
+print(data.frame(Prediction = answers))}
+```
+```{r write answers to files, eval=FALSE}
+# writing the results to files as specified in project description
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("./answers/problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(answers)
+```
+
+After these results were submitted, they proved to be correct, thus validating the accuracy of the model to at least better than 95% (i.e. not 1 in 20 was classified incorrectly).
+
+## Conclusions
+
+Based upon some explorations, I was able to determine that I could train a reasonably model on this exercise data using a manageable amount of computing time. The model performed well in the cross-validation, achieving 99.24 % accuracy.
+
+When the model was then applied to a test set of 20 cases, it identified all 20 correctly (100% accuracy).
+
+[1]:url "http://groupware.les.inf.puc-rio.br/har"
+[2]:url "https://class.coursera.org/predmachlearn-007"
